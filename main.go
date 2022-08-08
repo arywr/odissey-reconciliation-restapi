@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"log"
 	"net/http"
 	"odissey-golang/odissey-reconciliation-restapi/app"
 	"odissey-golang/odissey-reconciliation-restapi/controller"
@@ -14,6 +16,8 @@ import (
 	"github.com/julienschmidt/httprouter"
 	"github.com/rs/cors"
 )
+
+const webPort = "3000"
 
 func main() {
 	db := app.NewDB()
@@ -59,9 +63,11 @@ func main() {
 	handler := cors.Default().Handler(router)
 
 	server := http.Server{
-		Addr:    "localhost:3000",
+		Addr:    fmt.Sprintf("localhost:%s", webPort),
 		Handler: handler,
 	}
+
+	log.Printf("Starting service on port %s\n", webPort)
 
 	err := server.ListenAndServe()
 	helper.PanicIfError(err)

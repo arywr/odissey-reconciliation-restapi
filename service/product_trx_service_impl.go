@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"odissey-golang/odissey-reconciliation-restapi/helper"
 	"odissey-golang/odissey-reconciliation-restapi/model/entity"
@@ -68,6 +69,7 @@ func (service *ProductTrxServiceImpl) Create(ctx context.Context, request web.Pr
 }
 
 func (service *ProductTrxServiceImpl) CreateFromCSV(ctx context.Context, request *http.Request) {
+	var counterTotal int
 	current := time.Now().Format("2006-01-02 15:04:05")
 
 	createRequest := web.ProductTrxCreateExcel{}
@@ -81,12 +83,8 @@ func (service *ProductTrxServiceImpl) CreateFromCSV(ctx context.Context, request
 
 	defer csvFile.Close()
 
-	jobs := make(chan entity.ProductTransaction, runtime.NumCPU())
-	wg := new(sync.WaitGroup)
-
-	go dispatchWorkers(service, jobs, wg, ctx)
-
 	isHeader := true
+	var store []entity.ProductTransaction
 
 	for {
 		row, err := csvReader.Read()
@@ -104,8 +102,8 @@ func (service *ProductTrxServiceImpl) CreateFromCSV(ctx context.Context, request
 
 		var amount float64
 
-		if s, err := strconv.ParseFloat(row[11], 64); err == nil {
-			amount = s
+		if floatAmount, err := strconv.ParseFloat(row[11], 64); err == nil {
+			amount = floatAmount
 		}
 
 		transaction := entity.ProductTransaction{
@@ -131,30 +129,109 @@ func (service *ProductTrxServiceImpl) CreateFromCSV(ctx context.Context, request
 			UpdatedAt:             current,
 		}
 
-		wg.Add(1)
-		jobs <- transaction
+		counterTotal++
+		store = append(store, transaction)
 	}
-	close(jobs)
-	wg.Wait()
+
+	tx, err := service.DB.Begin()
+	helper.PanicIfError(err)
+
+	defer helper.CommitOrRollback(tx)
+
+	log.Println(createRequest.OwnerId)
+
+	progress := entity.Progress{
+		ProgressName:    fmt.Sprintf("Upload: %s", createRequest.OwnerId),
+		ProgressEventId: 1,
+		File:            file,
+		Status:          "on process",
+		Percentage:      0,
+		CreatedAt:       current,
+		UpdatedAt:       current,
+		DeletedAt:       nil,
+	}
+
+	progressResult := service.Repository.SaveProgress(ctx, tx, progress)
+
+	jobs := generateIndex(store)
+
+	worker := runtime.NumCPU()
+	result := TestingInsert(service, ctx, jobs, worker)
+
+	counterSuccess := 0
+	for res := range result {
+		if res.Id == 0 {
+			log.Println("Has Error")
+		} else {
+			counterSuccess++
+		}
+
+		if counterSuccess%100 == 0 {
+			// Updating Current Progress
+			progressResult.Percentage = float64(counterSuccess) / float64(counterTotal) * 100
+			service.Repository.UpdateProgress(ctx, tx, progressResult)
+		}
+	}
 
 	helper.DestroyFile(file)
+
+	progressResult.Percentage = 100
+	progressResult.Status = "completed"
+	service.Repository.UpdateProgress(ctx, tx, progressResult)
 }
 
-func dispatchWorkers(service *ProductTrxServiceImpl, jobs <-chan entity.ProductTransaction, wg *sync.WaitGroup, ctx context.Context) {
-	for workerIndex := 0; workerIndex <= runtime.NumCPU(); workerIndex++ {
-		go func(workerIndex int, jobs <-chan entity.ProductTransaction, wg *sync.WaitGroup) {
-			counter := 0
+func generateIndex(store []entity.ProductTransaction) <-chan entity.ProductTransaction {
+	result := make(chan entity.ProductTransaction)
 
-			for job := range jobs {
-				doTheJob(workerIndex, counter, service, job, ctx)
+	go func() {
+		for _, transaction := range store {
+			result <- transaction
+		}
+
+		close(result)
+	}()
+
+	return result
+}
+
+func TestingInsert(
+	service *ProductTrxServiceImpl,
+	ctx context.Context,
+	jobs <-chan entity.ProductTransaction,
+	worker int,
+) <-chan entity.ProductTransaction {
+	result := make(chan entity.ProductTransaction)
+
+	wg := new(sync.WaitGroup)
+	wg.Add(worker)
+
+	go func() {
+		for i := 0; i < worker; i++ {
+			go func() {
+				for job := range jobs {
+					response := InsertFromExcel(service, job, ctx)
+					result <- response
+				}
 				wg.Done()
-				counter++
-			}
-		}(workerIndex, jobs, wg)
-	}
+			}()
+		}
+	}()
+
+	go func() {
+		wg.Wait()
+		close(result)
+	}()
+
+	return result
 }
 
-func doTheJob(workerIndex, counter int, service *ProductTrxServiceImpl, transaction entity.ProductTransaction, ctx context.Context) {
+func InsertFromExcel(
+	service *ProductTrxServiceImpl,
+	transaction entity.ProductTransaction,
+	ctx context.Context,
+) entity.ProductTransaction {
+	var response entity.ProductTransaction
+
 	for {
 		var outerError error
 		func(outerError *error) {
@@ -170,10 +247,13 @@ func doTheJob(workerIndex, counter int, service *ProductTrxServiceImpl, transact
 
 			defer helper.CommitOrRollback(tx)
 
-			service.Repository.Save(ctx, tx, transaction)
+			response = service.Repository.Save(ctx, tx, transaction)
 		}(&outerError)
 		if outerError == nil {
 			break
 		}
 	}
+
+	return response
+
 }

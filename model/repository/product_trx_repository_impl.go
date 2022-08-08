@@ -80,32 +80,53 @@ func (repository *ProductTrxRepositoryImpl) Save(ctx context.Context, tx *sql.Tx
 	return transaction
 }
 
-func (ProductTrxRepository *ProductTrxRepositoryImpl) SaveEmptyReturn(ctx context.Context, tx *sql.Tx, transaction entity.ProductTransaction) {
+func (repository *ProductTrxRepositoryImpl) SaveProgress(ctx context.Context, tx *sql.Tx, progress entity.Progress) entity.Progress {
 	query := fmt.Sprintf(`
-		INSERT INTO od_product_transactions (%s)
+		INSERT INTO od_progress (
+			progress_name, 
+			progress_event_id, 
+			status, 
+			maximum_counter,
+			percentage, 
+			file, 
+			created_at, 
+			updated_at, 
+			deleted_at
+		)
 		VALUES (%s)
-	`, strings.Join(dataHeaders, ","), strings.Join(helper.GenerateQuestionsMark(len(dataHeaders)), ","))
+	`, strings.Join(helper.GenerateQuestionsMark(9), ","))
 
-	var current string
-	currentTime := time.Now().Format("2006-01-02 15:04:05")
-
-	if transaction.CreatedAt != "" {
-		current = transaction.CreatedAt
-	} else {
-		current = currentTime
-	}
-
-	_, err := tx.ExecContext(
+	result, err := tx.ExecContext(
 		ctx,
 		query,
-		transaction.OwnerId, transaction.TransactionId, transaction.TransactionCode,
-		transaction.TransactionStatus, transaction.TransactionKey, transaction.TransactionDate,
-		transaction.TransactionDateTime, transaction.TransactionTypeId, transaction.TelkomTransactionId,
-		transaction.MerchantTransactionId, transaction.ChannelTransactionId, transaction.ProductCode,
-		transaction.ProductName, transaction.MerchantCode, transaction.MerchantName,
-		transaction.ChannelCode, transaction.ChannelName, transaction.Nominal,
-		current, current, nil,
+		progress.ProgressName,
+		progress.ProgressEventId,
+		progress.Status,
+		progress.Percentage,
+		progress.File,
+		progress.CreatedAt,
+		progress.UpdatedAt,
+		nil,
 	)
 
 	helper.PanicIfError(err)
+
+	id, err := result.LastInsertId()
+	helper.PanicIfError(err)
+
+	progress.Id = int(id)
+	return progress
+}
+
+func (repository *ProductTrxRepositoryImpl) UpdateProgress(ctx context.Context, tx *sql.Tx, progress entity.Progress) entity.Progress {
+	query := `
+		UPDATE od_progress
+		SET status = ?, percentage = ?, updated_at = ?
+		WHERE id = ?
+	`
+
+	_, err := tx.ExecContext(ctx, query, progress.Status, progress.Percentage, time.Now().Format("2006-01-02 15:04:05"), progress.Id)
+	helper.PanicIfError(err)
+
+	return progress
 }
